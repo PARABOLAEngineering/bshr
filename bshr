@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+
+# Configuration
+CONFIG_FILE="$HOME/.config/bshr/config.toml"
+CACHE_DIR="$HOME/.cache/bshr"
+RECYCLE_BIN="$HOME/.local/share/Trash/files"
+
+# Create necessary directories
+mkdir -p "$CACHE_DIR"
+
+# Initialize config if not exists
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    cat > "$CONFIG_FILE" <<EOF
+# bshr configuration
+save_scripts = false
+
+# Python-specific settings
+python_venv_path = "$HOME/.cache/bshr/venv-python"
+python_allow_break_system = true
+
+# Custom interpreters
+[interpreters]
+# Example:
+# zsh = "/bin/zsh"
+# node = "/usr/bin/node"
+EOF
+fi
+
+# Read config
+save_scripts=$(grep 'save_scripts' "$CONFIG_FILE" | cut -d= -f2 | tr -d ' ' | tr -d '"')
+python_venv_path=$(grep 'python_venv_path' "$CONFIG_FILE" | cut -d= -f2 | tr -d ' ' | tr -d '"')
+python_allow_break_system=$(grep 'python_allow_break_system' "$CONFIG_FILE" | cut -d= -f2 | tr -d ' ' | tr -d '"')
+
+# Generate filename-friendly string
+sanitize_name() {
+    echo "$1" | tr -cd '[:alnum:]._-' | head -c 50 | sed 's/^[-_.]*//;s/[-_.]*$//'
+}
+
+# Help screen
+show_help() {
+    cat <<EOF
+bshr - Smart script runner with environment management
+
+Usage:
+  bshr [OPTIONS] <command>
+  bshr <interpreter> <code>
+  bshr dump
+  bshr list
+
+Options:
+  --help, -h       Show this help message
+  --interpreter, -i Specify interpreter directly
+  dump             Clean the cache directory
+  list             Show saved scripts
+
+Supported interpreters:
+  bash (default)   Run bash commands with smart cleanup
+  python           Run Python code in dedicated venv with system package control
+  [custom]         Any interpreter defined in config.toml
+
+Examples:
+  bshr "echo 'Hello Bash!'"
+  bshr python "import sys; print(sys.version)"
+  bshr --interpreter=zsh "echo 'Running in Zsh'"
+  bshr dump
+  bshr list
+EOF
+}
+
+# Clean cache
+clean_cache() {
+    if [[ -d "$RECYCLE_BIN" ]]; then
+        mv "$CACHE_DIR"/* "$RECYCLE_BIN/" 2>/dev/null
+    else
+        rm -rf "$CACHE_DIR"/*
+    fi
+    echo "bshr: Cache cleared"
+}
+
+# List cached scripts
+list_cache() {
+    echo "Saved scripts in cache:"
+    find "$CACHE_DIR" -type f -exec ls -lh {} + 2>/dev/null | awk '{print $9 " (" $5 ")"}' | sed "s|$CACHE_DIR/||"
+}
+
+# Handle commands
+case "$1" in
+    dump)
+        clean_cache
+        exit 0
+        ;;
+    list)
+        list_cache
+        exit 0
+        ;;
+    --help|-h)
+        show_help
+        exit 0
+        ;;
+esac
+
+# Determine interpreter and code
+INTERPRETER="bash"
+CODE="$*"
+
+# Check if first argument is a registered interpreter
+if [[ $# -gt 1 ]]; then
+    custom_interpreter=$(grep -A1 "\[interpreters\]" "$CONFIG_FILE" | grep "^$1" | cut -d= -f2 | tr -d ' ' | tr -d '"')
+    if [[ -n "$custom_interpreter" ]]; then
+        INTERPRETER="$1"
+        shift
+        CODE="$*"
+    elif [[ "$1" == "python" ]]; then
+        INTERPRETER="python"
+        shift
+        CODE="$*"
+    fi
+fi
+
+# Handle interpreter specification via flag
+if [[ "$1" == "--interpreter" || "$1" == "-i" ]]; then
+    shift
+    INTERPRETER="$1"
+    shift
+    CODE="$*"
+fi
+
+# Python handler
+if [[ "$INTERPRETER" == "python" ]]; then
+    VENV_PATH="${python_venv_path:-$HOME/.cache/bshr/venv-python}"
+    NAME_PART=$(sanitize_name "$CODE")
+    TMP_SCRIPT="$CACHE_DIR/python_${NAME_PART}_$(date +%s%N).py"
+    
+    if [[ ! -f "$VENV_PATH/bin/python" ]]; then
+        echo "bshr: Creating Python venv at $VENV_PATH"
+        python3 -m venv "$VENV_PATH"
+        "$VENV_PATH/bin/python" -m pip install --upgrade pip
+    fi
+
+    PYTHON_EXEC="$VENV_PATH/bin/python"
+    echo "$CODE" > "$TMP_SCRIPT"
+
+    PYTHON_VERSION=$("$PYTHON_EXEC" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    if (( $(echo "$PYTHON_VERSION >= 3.11" | bc -l) )) && [[ "$python_allow_break_system" == "true" ]]; then
+        "$PYTHON_EXEC" --break-system-packages "$TMP_SCRIPT"
+    else
+        "$PYTHON_EXEC" "$TMP_SCRIPT"
+    fi
+
+    if [[ "$save_scripts" != "true" ]]; then
+        rm -f "$TMP_SCRIPT"
+    fi
+    exit 0
+fi
+
+# Custom interpreter handler
+custom_interpreter=$(grep -A1 "\[interpreters\]" "$CONFIG_FILE" | grep "^$INTERPRETER" | cut -d= -f2 | tr -d ' ' | tr -d '"')
+if [[ -n "$custom_interpreter" ]]; then
+    NAME_PART=$(sanitize_name "$CODE")
+    TMP_SCRIPT="$CACHE_DIR/${INTERPRETER}_${NAME_PART}_$(date +%s%N).script"
+    echo "$CODE" > "$TMP_SCRIPT"
+    chmod +x "$TMP_SCRIPT"
+    "$custom_interpreter" "$TMP_SCRIPT"
+    
+    if [[ "$save_scripts" != "true" ]]; then
+        rm -f "$TMP_SCRIPT"
+    fi
+    exit 0
+fi
+
+# Default Bash handler
+NAME_PART=$(sanitize_name "$CODE")
+SCRIPT_FILE="$CACHE_DIR/bash_${NAME_PART}_$(date +%s%N).sh"
+echo "#!/usr/bin/env bash" > "$SCRIPT_FILE"
+echo "$CODE" >> "$SCRIPT_FILE"
+chmod +x "$SCRIPT_FILE"
+
+bash "$SCRIPT_FILE"
+
+if [[ "$save_scripts" != "true" ]]; then
+    rm -f "$SCRIPT_FILE"
+fi
+exit 0
