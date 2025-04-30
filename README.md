@@ -22,6 +22,8 @@ Ensure ~/bin is in your PATH:
        bash
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+
+
 Usage: 
 bshr [OPTIONS] <command>
 bshr <interpreter> <code>
