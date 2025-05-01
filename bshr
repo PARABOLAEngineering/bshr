@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+
+# Version: 2.1
+# Author: Reed Marin (0xreedmarin)
+# Description: Robust Polyglot Script Runner
+
+# --- Configuration System ---
+CONFIG_DIR="$HOME/.config/bshr"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
+CACHE_BASE="$HOME/.cache/bshr"
+RECYCLE_BIN="$HOME/.local/share/Trash/files"
+
+# Language-specific directories
+declare -A LANG_DIRS=(
+    ["python"]="venvs"
+    ["node"]="node_modules"
+    ["ruby"]="gems"
+    ["rust"]="cargo"
+    ["java"]="jars"
+)
+
+# Initialize filesystem
+mkdir -p "$CONFIG_DIR" "$CACHE_BASE"
+for dir in "${LANG_DIRS[@]}"; do
+    mkdir -p "$CACHE_BASE/$dir"
+done
+
+# Default configuration
+init_config() {
+    cat > "$CONFIG_FILE" <<EOF
+[core]
+save_scripts = false
+confirm_destructive = true
+
+[python]
+venv_path = "$CACHE_BASE/${LANG_DIRS[python]}"
+break_system_packages = true
+
+[node]
+module_path = "$CACHE_BASE/${LANG_DIRS[node]}"
+
+[ruby]
+gem_home = "$CACHE_BASE/${LANG_DIRS[ruby]}"
+
+[rust]
+cargo_home = "$CACHE_BASE/${LANG_DIRS[rust]}"
+
+[java]
+maven_repo = "$CACHE_BASE/${LANG_DIRS[java]}"
+
+[interpreters]
+# python = "/usr/bin/python3"
+# node = "/usr/bin/node"
+EOF
+}
+
+[[ -f "$CONFIG_FILE" ]] || init_config
+
+# --- Utilities ---
+sanitize_name() {
+    echo "$1" | tr -cd '[:alnum:]._-' | head -c 50 | sed 's/^[-_.]*//;s/[-_.]*$//'
+}
+
+confirm_action() {
+    local msg=$1
+    if [[ $(get_config core confirm_destructive) == "true" ]]; then
+        read -rp "bshr: $msg (y/n): " answer
+        [[ "$answer" == "y" ]] || exit 1
+    fi
+}
+
+get_config() {
+    local section=$1 key=$2
+    grep -A1 "\[$section\]" "$CONFIG_FILE" | grep "$key" | cut -d= -f2 | tr -d ' "' | tail -n1
+}
+
+# --- Language Handlers ---
+run_python() {
+    local code="$*"
+    local venv_path=$(get_config python venv_path)
+    local sanitized=$(sanitize_name "$code")
+    local script_path="$CACHE_BASE/python_${sanitized}_$(date +%s).py"
+
+    # Prepare venv
+    if [[ ! -f "$venv_path/bin/python3" ]]; then
+        confirm_action "Create Python venv at $venv_path?" || return 1
+        python3 -m venv "$venv_path" || return 1
+    fi
+
+    # Execute
+    echo "$code" > "$script_path"
+    local py_exec="$venv_path/bin/python3"
+    
+    if [[ $(get_config python break_system_packages) == "true" ]]; then
+        "$py_exec" --break-system-packages "$script_path"
+    else
+        "$py_exec" "$script_path"
+    fi
+    local exit_code=$?
+
+    [[ $(get_config core save_scripts) == "true" ]] || rm -f "$script_path"
+    return $exit_code
+}
+
+run_ruby() {
+    local code="$*"
+    local gem_home=$(get_config ruby gem_home)
+    local sanitized=$(sanitize_name "$code")
+    local script_path="$CACHE_BASE/ruby_${sanitized}_$(date +%s).rb"
+
+    export GEM_HOME="$gem_home"
+    export GEM_PATH="$gem_home"
+    echo "$code" > "$script_path"
+    ruby "$script_path"
+    local exit_code=$?
+
+    [[ $(get_config core save_scripts) == "true" ]] || rm -f "$script_path"
+    return $exit_code
+}
+
+run_rust() {
+    local code="$*"
+    local cargo_home=$(get_config rust cargo_home)
+    local sanitized=$(sanitize_name "$code")
+    local script_path="$CACHE_BASE/rust_${sanitized}_$(date +%s).rs"
+    local temp_project="$CACHE_BASE/rust_temp_$(date +%s)"
+
+    export CARGO_HOME="$cargo_home"
+    mkdir -p "$temp_project/src"
+    
+    cat > "$temp_project/Cargo.toml" <<EOF
+[package]
+name = "bshr_temp"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+    echo "fn main() { $code }" > "$temp_project/src/main.rs"
+    
+    (cd "$temp_project" && cargo run --quiet)
+    local exit_code=$?
+
+    [[ $(get_config core save_scripts) == "true" ]] || rm -rf "$temp_project"
+    return $exit_code
+}
+
+run_java() {
+    local code="$*"
+    local sanitized
+    sanitized=$(sanitize_name "$code")
+    local class_name="BshrTemp_$(date +%s)"
+    local script_path="$CACHE_BASE/${class_name}.java"
+    local class_dir="$CACHE_BASE/java_classes_$(date +%s)"
+    
+    mkdir -p "$class_dir" || { echo "bshr: Failed to create directory $class_dir" >&2; return 1; }
+    
+    cat > "$script_path" <<EOF
+public class ${class_name} {
+    public static void main(String[] args) {
+        $code
+    }
+}
+EOF
+
+    if ! javac -d "$class_dir" "$script_path"; then
+        echo "bshr: Java compilation failed" >&2
+        rm -f "$script_path"
+        rm -rf "$class_dir"
+        return 1
+    fi
+    
+    java -cp "$class_dir" "$class_name"
+    local exit_code=$?
+
+    if [[ $(get_config core save_scripts) != "true" ]]; then
+        rm -f "$script_path"
+        rm -rf "$class_dir"
+    fi
+    return $exit_code
+}
+# --- Main CLI ---
+show_help() {
+    cat <<EOF
+bshr v2.1 - Polyglot Script Runner
+
+Usage:
+  bshr <language> <code>
+  bshr python "import sys; print(sys.version)"
+  bshr ruby "puts RUBY_VERSION"
+  bshr --help
+
+Languages:
+  python, ruby, rust, java
+EOF
+}
+
+case "$1" in
+    python|ruby|rust|java)
+        lang=$1
+        shift
+        "run_$lang" "$*"
+        ;;
+    -h|--help)
+        show_help
+        ;;
+    *)
+        echo "Unknown command. Try: bshr --help"
+        exit 1
+        ;;
+esac
