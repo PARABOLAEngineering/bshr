@@ -17,6 +17,7 @@ declare -A LANG_DIRS=(
     ["ruby"]="gems"
     ["rust"]="cargo"
     ["java"]="jars"
+    ["go"]="mods"
 )
 
 # Initialize filesystem
@@ -47,6 +48,9 @@ cargo_home = "$CACHE_BASE/${LANG_DIRS[rust]}"
 
 [java]
 maven_repo = "$CACHE_BASE/${LANG_DIRS[java]}"
+
+[go]
+maven_repo = "$CACHE_BASE/${LANG_DIRS[go]}"
 
 [interpreters]
 # python = "/usr/bin/python3"
@@ -178,6 +182,37 @@ EOF
     fi
     return $exit_code
 }
+run_go() {
+    local code="$*"
+    local go_path="$CACHE_BASE/go_projects/temp_$(date +%s)"
+    mkdir -p "$go_path"
+    
+    # Smart import detection
+    local imports="import ("
+    [[ "$code" =~ "fmt." ]] && imports+="\"fmt\"\n"
+    [[ "$code" =~ "http." ]] && imports+="\"net/http\"\n"
+    [[ "$code" =~ "json." ]] && imports+="\"encoding/json\"\n"
+    imports+=")"
+    
+    cat > "$go_path/main.go" <<EOF
+package main
+$imports
+func main() {
+    $code
+}
+EOF
+
+    # Initialize module if not in GOPATH
+    if [[ -z "$GOPATH" ]]; then
+        (cd "$go_path" && go mod init temp >/dev/null)
+    fi
+    
+    (cd "$go_path" && go run .)
+    local exit_code=$?
+    
+    [[ $(get_config core save_scripts) == "true" ]] || rm -rf "$go_path"
+    return $exit_code
+}
 # --- Main CLI ---
 show_help() {
     cat <<EOF
@@ -190,12 +225,12 @@ Usage:
   bshr --help
 
 Languages:
-  python, ruby, rust, java
+  python, ruby, rust, java, go
 EOF
 }
 
 case "$1" in
-    python|ruby|rust|java)
+    python|ruby|rust|java|go)
         lang=$1
         shift
         "run_$lang" "$*"
